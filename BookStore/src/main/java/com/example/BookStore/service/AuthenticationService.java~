@@ -1,0 +1,220 @@
+package com.example.BookStore.service;
+
+import com.example.BookStore.dto.AuthenticationRequest;
+import com.example.BookStore.dto.AuthenticationResponse;
+import com.example.BookStore.dto.RegisterRequest;
+import com.example.BookStore.model.Role;
+import com.example.BookStore.model.Token;
+import com.example.BookStore.model.TokenType;
+import com.example.BookStore.model.User;
+import com.example.BookStore.repository.TokenRepository;
+import com.example.BookStore.repository.UserRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.time.Duration;
+
+@Service
+@RequiredArgsConstructor
+public class AuthenticationService {
+    private final UserRepository userRepository;
+    private final TokenRepository tokenRepository;
+    private final PasswordEncoder passwordEncoder;
+    private final JwtService jwtService;
+    private final AuthenticationManager authenticationManager;
+
+//    public AuthenticationResponse register(RegisterRequest registerRequest) {
+//        User user = User.builder()
+//                .firstName(registerRequest.getFirstName())
+//                .lastName(registerRequest.getLastName())
+//                .email(registerRequest.getEmail())
+//                .password(passwordEncoder.encode(registerRequest.getPassword()))
+//                .role(Role.USER)
+//                .build();
+//        var savedUser = userRepository.save(user);
+//        String jwtToken = jwtService.generateToken(user);
+//        String refreshToken = jwtService.generateRefreshToken(user);
+//        saveUserToken(savedUser, jwtToken);
+//        return AuthenticationResponse.builder()
+//                .refreshToken(refreshToken)
+//                .accessToken(jwtToken)
+//                .build();
+//    }
+//
+//
+//    public AuthenticationResponse authenticate(AuthenticationRequest authenticationRequest) {
+//        authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(authenticationRequest.getEmail(), authenticationRequest.getPassword()));
+//        User user = userRepository.findByEmail(authenticationRequest.getEmail()).orElseThrow();
+//        String jwtToken = jwtService.generateToken(user);
+//        String refreshToken = jwtService.generateRefreshToken(user);
+//        revokeAllUserTokens(user);
+//        saveUserToken(user, jwtToken);
+//        return AuthenticationResponse.builder()
+//                .accessToken(jwtToken)
+//                .refreshToken(refreshToken)
+//                .build();
+//    }
+    private void revokeAllUserTokens(User user) {
+        var validUserTokens = tokenRepository.findAllValidTokensByUser(user.getId());
+        if(validUserTokens.isEmpty())
+        {
+            return;
+        }
+        validUserTokens.forEach(token -> {
+            token.setExpired(true);
+            token.setRevoked(true);
+        });
+        tokenRepository.saveAll(validUserTokens);
+    }
+    private void saveUserToken(User user, String jwtToken) {
+        var token = Token.builder()
+                .user(user)
+                .token(jwtToken)
+                .tokenType(TokenType.BEARER)
+                .expired(false)
+                .revoked(false)
+                .build();
+        tokenRepository.save(token);
+    }
+//    public void refreshToken(HttpServletRequest request, HttpServletResponse response) throws IOException {
+//        final String authHeader = request.getHeader(HttpHeaders.AUTHORIZATION);
+//        final String refreshToken;
+//        final String userEmail;
+//        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+//            return;
+//        }
+//        refreshToken = authHeader.substring(7);
+//        userEmail = jwtService.extractUsername(refreshToken);
+//        if (userEmail != null) {
+//            var user = this.userRepository.findByEmail(userEmail)
+//                    .orElseThrow();
+//            if(jwtService.isTokenValid(refreshToken, user))
+//            {
+//                var accessToken = jwtService.generateToken(user);
+//                revokeAllUserTokens(user);
+//                saveUserToken(user, accessToken);
+//                var authResponse = AuthenticationResponse.builder()
+//                        .accessToken(accessToken)
+//                        .refreshToken(refreshToken)
+//                        .build();
+//                new ObjectMapper().writeValue(response.getOutputStream(), authResponse);
+//            }
+//        }
+//    }
+
+//-----------------------------------------NEW IMPL------------------------------------------------------
+    //recently added
+public void refreshToken(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    String refreshToken = null;
+
+    if (request.getCookies() != null) {
+        for (Cookie cookie : request.getCookies()) {
+            if ("refreshToken".equals(cookie.getName())) {
+                refreshToken = cookie.getValue();
+                break;
+            }
+        }
+    }
+
+    if (refreshToken == null) {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        return;
+    }
+
+    final String userEmail = jwtService.extractUsername(refreshToken);
+
+    if (userEmail != null) {
+        var user = userRepository.findByEmail(userEmail).orElseThrow();
+
+        if (jwtService.isTokenValid(refreshToken, user)) {
+            var accessToken = jwtService.generateToken(user);
+            revokeAllUserTokens(user);
+            saveUserToken(user, accessToken);
+
+            var authResponse = AuthenticationResponse.builder()
+                    .accessToken(accessToken)
+                    .build();
+
+            new ObjectMapper().writeValue(response.getOutputStream(), authResponse);
+        } else {
+            response.setStatus(HttpServletResponse.SC_FORBIDDEN);
+        }
+    } else {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    }
+}
+    public AuthenticationResponse register(RegisterRequest registerRequest, HttpServletResponse response) {
+        User user = User.builder()
+                .firstName(registerRequest.getFirstName())
+                .lastName(registerRequest.getLastName())
+                .email(registerRequest.getEmail())
+                .password(passwordEncoder.encode(registerRequest.getPassword()))
+                .role(Role.USER)
+                .build();
+
+        var savedUser = userRepository.save(user);
+        String jwtToken = jwtService.generateToken(user);
+        String refreshToken = jwtService.generateRefreshToken(user);
+
+        saveUserToken(savedUser, jwtToken);
+
+        
+        ResponseCookie refreshTokenCookie = ResponseCookie.from("refreshToken", refreshToken)
+                .httpOnly(true)
+                .secure(true)
+                .path("/api/auth/refresh-token")
+                .maxAge(Duration.ofDays(7))
+                .sameSite("None")
+                .build();
+
+        response.setHeader(HttpHeaders.SET_COOKIE, refreshTokenCookie.toString());
+        return AuthenticationResponse.builder()
+                .accessToken(jwtToken)
+                .build();
+    }
+
+    public AuthenticationResponse authenticate(AuthenticationRequest request, HttpServletResponse response) {
+        authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
+        );
+
+        User user = userRepository.findByEmail(request.getEmail()).orElseThrow();
+        String jwtToken = jwtService.generateToken(user);
+        String refreshToken = jwtService.generateRefreshToken(user);
+
+        revokeAllUserTokens(user);
+        saveUserToken(user, jwtToken);
+
+//        Cookie cookie = new Cookie("refreshToken", refreshToken);
+//        cookie.setHttpOnly(true);
+//        cookie.setSecure(false);
+//        cookie.setPath("/api/auth/refresh-token");
+//        cookie.setMaxAge(7 * 24 * 60 * 60); // 7 days
+//        response.addCookie(cookie);
+        ResponseCookie refreshTokenCookie = ResponseCookie.from("refreshToken", refreshToken)
+                .httpOnly(true)
+                .secure(true)
+                .path("/api/auth/refresh-token")
+                .maxAge(Duration.ofDays(7))
+                .sameSite("None")
+                .build();
+
+        response.setHeader(HttpHeaders.SET_COOKIE, refreshTokenCookie.toString());
+        return AuthenticationResponse.builder()
+                .accessToken(jwtToken)
+                .build();
+    }
+}
